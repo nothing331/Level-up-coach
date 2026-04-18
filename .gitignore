@@ -3,6 +3,10 @@
 /.env.local
 /__pycache__/
 *.pyc
+/.pytest_cache/
+/frontend/.next/
+/frontend/node_modules/
+/frontend/.vercel/
 /data/*
 !/data/.gitkeep
 !/data/README.md

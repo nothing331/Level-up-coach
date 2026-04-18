@@ -12,6 +12,22 @@ from pydantic import BaseModel, Field, field_validator
 DifficultyLabel = Literal["easy", "medium", "hard"]
 ExamMode = Literal["chapter_quiz", "full_physics_mix"]
 QuestionType = Literal["mcq"]
+AttemptStatus = Literal["active", "submitted", "expired"]
+TimelineEventType = Literal[
+    "question_entered",
+    "answer_selected",
+    "question_left",
+    "flag_toggled",
+    "submitted",
+    "auto_submitted",
+]
+BehaviorSignalCode = Literal[
+    "overinvests_in_hard_questions",
+    "slow_between_questions",
+    "hesitates_before_committing",
+    "accuracy_drops_late",
+    "revisits_without_improvement",
+]
 
 
 def utc_now() -> datetime:
@@ -175,6 +191,33 @@ class StudentAnswer(BaseModel):
     selected_option_id: str | None = None
 
 
+class AttemptTimelineEvent(BaseModel):
+    type: TimelineEventType
+    at: datetime
+    question_id: str | None = None
+    selected_option_id: str | None = None
+    flagged: bool | None = None
+
+
+class AttemptSession(BaseModel):
+    attempt_id: str = Field(default_factory=lambda: new_id("attempt"))
+    question_set_id: str
+    status: AttemptStatus = "active"
+    started_at: datetime = Field(default_factory=utc_now)
+    deadline_at: datetime
+    submitted_at: datetime | None = None
+    duration_seconds: int
+    auto_submitted: bool = False
+
+
+class StartAttemptRequest(BaseModel):
+    question_set_id: str
+
+
+class StartAttemptResponse(BaseModel):
+    attempt: AttemptSession
+
+
 class ScoreSummary(BaseModel):
     attempted: int
     correct: int
@@ -188,12 +231,46 @@ class TopicPerformance(BaseModel):
     accuracy: float
     attempted: int
     weakness_level: Literal["low", "medium", "high"]
+    average_time_seconds: float = 0.0
 
 
 class DifficultyPerformance(BaseModel):
     difficulty_label: DifficultyLabel
     accuracy: float
     attempted: int
+    average_time_seconds: float = 0.0
+
+
+class QuestionTimingSummary(BaseModel):
+    question_id: str
+    time_spent_seconds: float = 0.0
+    visited_count: int = 0
+    answer_changed_count: int = 0
+    time_to_first_answer_seconds: float | None = None
+    average_gap_before_visit_seconds: float = 0.0
+    max_gap_before_visit_seconds: float = 0.0
+
+
+class TimingSummary(BaseModel):
+    total_duration_seconds: float = 0.0
+    average_time_per_question_seconds: float = 0.0
+    average_transition_delay_seconds: float = 0.0
+    total_transition_delay_seconds: float = 0.0
+    idle_transition_count: int = 0
+    slowest_question_ids: list[str] = Field(default_factory=list)
+    first_half_accuracy: float = 0.0
+    second_half_accuracy: float = 0.0
+    late_stage_accuracy_drop: bool = False
+    average_time_on_correct_seconds: float = 0.0
+    average_time_on_wrong_seconds: float = 0.0
+    question_timings: list[QuestionTimingSummary] = Field(default_factory=list)
+
+
+class BehaviorSignal(BaseModel):
+    code: BehaviorSignalCode
+    label: str
+    detail: str
+    evidence: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
 
 class QuestionReview(BaseModel):
@@ -202,6 +279,9 @@ class QuestionReview(BaseModel):
     correct_option_id: str
     result: Literal["correct", "incorrect", "unattempted"]
     explanation: str
+    time_spent_seconds: float = 0.0
+    visited_count: int = 0
+    answer_changed_count: int = 0
 
 
 class CoachingReport(BaseModel):
@@ -214,10 +294,15 @@ class CoachingReport(BaseModel):
 class PerformanceReport(BaseModel):
     report_id: str = Field(default_factory=lambda: new_id("report"))
     question_set_id: str
+    attempt_id: str | None = None
+    auto_submitted: bool = False
+    submitted_at: datetime | None = None
     score_summary: ScoreSummary
     topic_performance: list[TopicPerformance]
     difficulty_performance: list[DifficultyPerformance]
     question_review: list[QuestionReview]
+    timing_summary: TimingSummary = Field(default_factory=TimingSummary)
+    behavior_signals: list[BehaviorSignal] = Field(default_factory=list)
     coaching: CoachingReport
     generated_at: datetime = Field(default_factory=utc_now)
 
@@ -229,11 +314,22 @@ class GenerateResponse(BaseModel):
 
 class EvaluateRequest(BaseModel):
     question_set_id: str
+    attempt_id: str | None = None
+    submitted_at: datetime | None = None
+    auto_submitted: bool = False
     student_answers: list[StudentAnswer]
+    timeline_events: list[AttemptTimelineEvent] = Field(default_factory=list)
 
 
 class EvaluateResponse(BaseModel):
     performance_report: PerformanceReport
+    attempt: AttemptSession | None = None
+
+
+class AttemptStateResponse(BaseModel):
+    attempt: AttemptSession
+    question_set: QuestionSet | None = None
+    performance_report: PerformanceReport | None = None
 
 
 class IngestionSummary(BaseModel):

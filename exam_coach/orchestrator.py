@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .ingestion import IngestionService
 from .models import (
+    AttemptSession,
+    AttemptStateResponse,
+    EvaluateRequest,
     EvaluateResponse,
     ExamCoachInput,
     GenerateResponse,
     PerformanceReport,
+    StartAttemptResponse,
     StudentAnswer,
     TopicApiItem,
     TopicsResponse,
+    utc_now,
 )
 from .topic_catalog import load_topic_configs
 from .services import BlueprintService, EvaluationService, GenerationService, RetrievalService
@@ -65,9 +71,94 @@ class ExamCoachRuntime:
         self.run_store.save_report(question_set_internal.question_set_id, report.model_dump_json(indent=2))
         return EvaluateResponse(performance_report=report)
 
-    def evaluate_existing(self, question_set_id: str, student_answers: list[StudentAnswer]) -> PerformanceReport:
+    def start_attempt(self, question_set_id: str) -> StartAttemptResponse:
+        question_set = self.run_store.load_question_set_public(question_set_id)
+        blueprint = self.run_store.load_blueprint(question_set_id)
+        started_at = utc_now()
+        attempt = AttemptSession(
+            question_set_id=question_set.question_set_id,
+            started_at=started_at,
+            deadline_at=started_at + timedelta(minutes=blueprint.time_limit_minutes),
+            duration_seconds=blueprint.time_limit_minutes * 60,
+        )
+        self.run_store.save_attempt_session(attempt)
+        return StartAttemptResponse(attempt=attempt)
+
+    def get_attempt_state(self, attempt_id: str) -> AttemptStateResponse:
+        attempt = self._sync_attempt_status(self.run_store.load_attempt_session(attempt_id))
+        question_set = self.run_store.load_question_set_public(attempt.question_set_id)
+        performance_report = self.run_store.load_attempt_report(attempt_id)
+        return AttemptStateResponse(
+            attempt=attempt,
+            question_set=question_set,
+            performance_report=performance_report,
+        )
+
+    def evaluate_attempt(self, request: EvaluateRequest) -> EvaluateResponse:
+        if request.attempt_id is None:
+            report = self.evaluate_existing(
+                request.question_set_id,
+                request.student_answers,
+                submitted_at=request.submitted_at,
+                timeline_events=request.timeline_events,
+                auto_submitted=request.auto_submitted,
+            )
+            return EvaluateResponse(performance_report=report)
+
+        attempt = self._sync_attempt_status(self.run_store.load_attempt_session(request.attempt_id))
+        stored_report = self.run_store.load_attempt_report(request.attempt_id)
+        if stored_report is not None:
+            return EvaluateResponse(performance_report=stored_report, attempt=attempt)
+
+        if attempt.question_set_id != request.question_set_id:
+            raise ValueError("attempt_id does not match question_set_id.")
+
+        submitted_at = request.submitted_at or utc_now()
+        auto_submitted = request.auto_submitted or submitted_at > attempt.deadline_at
+        question_set_internal = self.run_store.load_question_set_internal(request.question_set_id)
+        report = EvaluationService().evaluate(
+            question_set_internal,
+            request.student_answers,
+            timeline_events=request.timeline_events,
+            attempt=attempt,
+            submitted_at=submitted_at,
+            auto_submitted=auto_submitted,
+        )
+
+        finalized_attempt = attempt.model_copy(
+            update={
+                "status": "expired" if auto_submitted else "submitted",
+                "submitted_at": submitted_at,
+                "auto_submitted": auto_submitted,
+            }
+        )
+        self.run_store.save_attempt_submission(
+            request.question_set_id,
+            request.attempt_id,
+            request.model_dump_json(indent=2),
+        )
+        self.run_store.save_attempt_session(finalized_attempt)
+        self.run_store.save_attempt_report(request.question_set_id, request.attempt_id, report)
+        self.run_store.save_report(request.question_set_id, report.model_dump_json(indent=2))
+        return EvaluateResponse(performance_report=report, attempt=finalized_attempt)
+
+    def evaluate_existing(
+        self,
+        question_set_id: str,
+        student_answers: list[StudentAnswer],
+        *,
+        submitted_at: datetime | None = None,
+        timeline_events=None,
+        auto_submitted: bool = False,
+    ) -> PerformanceReport:
         question_set_internal = self.run_store.load_question_set_internal(question_set_id)
-        report = EvaluationService().evaluate(question_set_internal, student_answers)
+        report = EvaluationService().evaluate(
+            question_set_internal,
+            student_answers,
+            timeline_events=timeline_events or [],
+            submitted_at=submitted_at,
+            auto_submitted=auto_submitted,
+        )
         self.run_store.save_report(question_set_id, report.model_dump_json(indent=2))
         return report
 
@@ -88,6 +179,13 @@ class ExamCoachRuntime:
                 if item.status != "archived"
             ]
         )
+
+    def _sync_attempt_status(self, attempt: AttemptSession) -> AttemptSession:
+        if attempt.status == "active" and utc_now() > attempt.deadline_at:
+            updated = attempt.model_copy(update={"status": "expired", "auto_submitted": True})
+            self.run_store.save_attempt_session(updated)
+            return updated
+        return attempt
 
 
 def run_exam_coach_flow(

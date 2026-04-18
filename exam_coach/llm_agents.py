@@ -8,7 +8,15 @@ from typing import Any
 import requests
 
 from .env import load_local_env
-from .models import CoachingReport, InternalQuestionRecord, QuestionOption, TopicPerformance, DifficultyPerformance
+from .models import (
+    BehaviorSignal,
+    CoachingReport,
+    DifficultyPerformance,
+    InternalQuestionRecord,
+    QuestionOption,
+    TimingSummary,
+    TopicPerformance,
+)
 
 
 class OpenAIResponsesClient:
@@ -196,6 +204,8 @@ class AnalysisAgent:
         *,
         topic_performance: list[TopicPerformance],
         difficulty_performance: list[DifficultyPerformance],
+        timing_summary: TimingSummary,
+        behavior_signals: list[BehaviorSignal],
     ) -> CoachingReport:
         schema = {
             "type": "object",
@@ -210,13 +220,15 @@ class AnalysisAgent:
         }
         instructions = (
             "You are the analysisAgent for an exam coach. "
-            "Convert topic accuracy and difficulty accuracy into concise coaching insights. "
+            "Convert topic accuracy, difficulty accuracy, timing signals, and behavior patterns into concise coaching insights. "
             "Prioritize actionable study advice over generic encouragement."
         )
         prompt = json.dumps(
             {
                 "topic_performance": [item.model_dump(mode="json") for item in topic_performance],
                 "difficulty_performance": [item.model_dump(mode="json") for item in difficulty_performance],
+                "timing_summary": timing_summary.model_dump(mode="json"),
+                "behavior_signals": [item.model_dump(mode="json") for item in behavior_signals],
             },
             ensure_ascii=False,
             indent=2,

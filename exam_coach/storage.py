@@ -7,7 +7,15 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
-from .models import QuestionBankRecord, QuestionSetInternal, TestBlueprint, TopicCatalogItem
+from .models import (
+    AttemptSession,
+    PerformanceReport,
+    QuestionBankRecord,
+    QuestionSet,
+    QuestionSetInternal,
+    TestBlueprint,
+    TopicCatalogItem,
+)
 
 
 class QuestionBankStore:
@@ -180,17 +188,29 @@ class RunArtifactStore:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def _run_dir(self, question_set_id: str) -> Path:
+        target = self.root / question_set_id
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _attempt_dir(self, question_set_id: str, attempt_id: str) -> Path:
+        target = self._run_dir(question_set_id) / "attempts" / attempt_id
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
     def save_blueprint(self, question_set_id: str, blueprint: TestBlueprint) -> None:
-        run_dir = self.root / question_set_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = self._run_dir(question_set_id)
         (run_dir / "blueprint.json").write_text(
             blueprint.model_dump_json(indent=2),
             encoding="utf-8",
         )
 
+    def load_blueprint(self, question_set_id: str) -> TestBlueprint:
+        run_path = self._run_dir(question_set_id) / "blueprint.json"
+        return TestBlueprint.model_validate_json(run_path.read_text(encoding="utf-8"))
+
     def save_question_set_internal(self, question_set: QuestionSetInternal) -> None:
-        run_dir = self.root / question_set.question_set_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = self._run_dir(question_set.question_set_id)
         (run_dir / "question_set_internal.json").write_text(
             question_set.model_dump_json(indent=2),
             encoding="utf-8",
@@ -201,10 +221,55 @@ class RunArtifactStore:
         )
 
     def load_question_set_internal(self, question_set_id: str) -> QuestionSetInternal:
-        run_dir = self.root / question_set_id / "question_set_internal.json"
-        return QuestionSetInternal.model_validate_json(run_dir.read_text(encoding="utf-8"))
+        run_path = self._run_dir(question_set_id) / "question_set_internal.json"
+        return QuestionSetInternal.model_validate_json(run_path.read_text(encoding="utf-8"))
+
+    def load_question_set_public(self, question_set_id: str) -> QuestionSet:
+        run_path = self._run_dir(question_set_id) / "question_set.json"
+        return QuestionSet.model_validate_json(run_path.read_text(encoding="utf-8"))
 
     def save_report(self, question_set_id: str, report_json: str) -> None:
-        run_dir = self.root / question_set_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = self._run_dir(question_set_id)
         (run_dir / "performance_report.json").write_text(report_json, encoding="utf-8")
+
+    def save_attempt_session(self, attempt: AttemptSession) -> None:
+        attempt_dir = self._attempt_dir(attempt.question_set_id, attempt.attempt_id)
+        (attempt_dir / "session.json").write_text(
+            attempt.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+    def save_attempt_submission(self, question_set_id: str, attempt_id: str, submission_json: str) -> None:
+        attempt_dir = self._attempt_dir(question_set_id, attempt_id)
+        (attempt_dir / "submission.json").write_text(submission_json, encoding="utf-8")
+
+    def save_attempt_report(self, question_set_id: str, attempt_id: str, report: PerformanceReport) -> None:
+        attempt_dir = self._attempt_dir(question_set_id, attempt_id)
+        (attempt_dir / "performance_report.json").write_text(
+            report.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+    def load_attempt_session(self, attempt_id: str) -> AttemptSession:
+        attempt_dir = self.find_attempt_dir(attempt_id)
+        return AttemptSession.model_validate_json((attempt_dir / "session.json").read_text(encoding="utf-8"))
+
+    def load_attempt_report(self, attempt_id: str) -> PerformanceReport | None:
+        attempt_dir = self.find_attempt_dir(attempt_id)
+        target = attempt_dir / "performance_report.json"
+        if not target.exists():
+            return None
+        return PerformanceReport.model_validate_json(target.read_text(encoding="utf-8"))
+
+    def has_attempt_report(self, attempt_id: str) -> bool:
+        attempt_dir = self.find_attempt_dir(attempt_id)
+        return (attempt_dir / "performance_report.json").exists()
+
+    def find_attempt_dir(self, attempt_id: str) -> Path:
+        for run_dir in self.root.iterdir():
+            if not run_dir.is_dir():
+                continue
+            target = run_dir / "attempts" / attempt_id
+            if target.exists():
+                return target
+        raise FileNotFoundError(attempt_id)
